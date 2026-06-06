@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { Ayah, Timestamp } from "@/lib/surah-data";
 import { formatClockTime } from "@/lib/time";
 
@@ -24,7 +24,6 @@ export default function AyahList({
   onPreviewAyah,
 }: AyahListProps) {
   const [showDoneAyahs, setShowDoneAyahs] = useState(false);
-  const rowRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressedKeyRef = useRef<string | null>(null);
   const timestampByKey = useMemo(() => {
@@ -44,17 +43,6 @@ export default function AyahList({
   const doneCount = useMemo(() => {
     return timestamps.filter((timestamp) => Number.isFinite(timestamp.end)).length;
   }, [timestamps]);
-
-  useEffect(() => {
-    if (!activeAyahKey) {
-      return;
-    }
-
-    rowRefs.current[activeAyahKey]?.scrollIntoView({
-      behavior: "smooth",
-      block: "center",
-    });
-  }, [activeAyahKey]);
 
   function clearLongPressTimer() {
     if (longPressTimerRef.current) {
@@ -109,9 +97,6 @@ export default function AyahList({
             <button
               key={ayah.key}
               type="button"
-              ref={(node) => {
-                rowRefs.current[ayah.key] = node;
-              }}
               onPointerDown={() => {
                 clearLongPressTimer();
                 longPressedKeyRef.current = null;
