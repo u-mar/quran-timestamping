@@ -5,6 +5,7 @@ import AyahList from "@/components/AyahList";
 import PlayerControls from "@/components/PlayerControls";
 import Waveform, { type WaveformHandle } from "@/components/Waveform";
 import { downloadTimestampJson } from "@/lib/export-json";
+import { loadSession, saveSession } from "@/lib/session-storage";
 import { useTimestampShortcuts } from "@/lib/keyboard";
 import {
   compareAyahPosition,
@@ -36,7 +37,7 @@ type PreviewState = {
 type ImportTimestamp = {
   key?: string;
   surah?: number;
-  ayah: number;
+  ayah?: number;
   start: number;
   end?: number;
 };
@@ -100,6 +101,7 @@ export default function TimestampEditor({ initialSurahId }: TimestampEditorProps
   const advancePreviewRef = useRef<(time: number) => void>(() => {});
   const previewStateRef = useRef<PreviewState | null>(null);
   const hasLoadedDefaultRangeRef = useRef(false);
+  const skipAutosaveMessageRef = useRef(false);
   const initialRange = useMemo(() => buildInitialRange(initialSurahId), [initialSurahId]);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [chaptersError, setChaptersError] = useState<string | null>(null);
@@ -118,6 +120,7 @@ export default function TimestampEditor({ initialSurahId }: TimestampEditorProps
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [importMessage, setImportMessage] = useState<string | null>(null);
+  const [autosaveMessage, setAutosaveMessage] = useState<string | null>(null);
   const [previewState, setPreviewStateState] = useState<PreviewState | null>(null);
   const [previewMessage, setPreviewMessage] = useState<string | null>(null);
 
@@ -200,7 +203,9 @@ export default function TimestampEditor({ initialSurahId }: TimestampEditorProps
 
       return items
         .map((item) => {
-          const key = item.key ?? makeAyahKey(item.surah ?? fallbackSurah ?? 0, item.ayah);
+          const key =
+            item.key ??
+            makeAyahKey(item.surah ?? fallbackSurah ?? 0, item.ayah ?? 0);
           const ayah = ayahByKey.get(key);
 
           if (!ayah || !Number.isFinite(item.start)) {
@@ -242,16 +247,35 @@ export default function TimestampEditor({ initialSurahId }: TimestampEditorProps
         const importedTimestamps = importedItems
           ? hydrateTimestamps(importedItems, loadedAyahs, fallbackSurah)
           : [];
+        const savedSession = importedItems ? null : loadSession(range);
+        const restoredTimestamps = savedSession
+          ? hydrateTimestamps(savedSession.timestamps, loadedAyahs, range.startSurah)
+          : [];
+        const nextTimestamps = importedTimestamps.length > 0 ? importedTimestamps : restoredTimestamps;
+        const nextCurrentAyahKey =
+          savedSession?.currentAyahKey ??
+          getNextPendingAyahKey(loadedAyahs, nextTimestamps, loadedAyahs[0]?.key ?? "");
 
         setAyahs(loadedAyahs);
         setLoadedRange(range);
         setRangeDraft(range);
-        setTimestamps(importedTimestamps);
+        setTimestamps(nextTimestamps);
         setMarkHistory([]);
-        setCurrentAyahKey(loadedAyahs[0]?.key ?? null);
+        setCurrentAyahKey(nextCurrentAyahKey || (loadedAyahs[0]?.key ?? null));
+        if (savedSession?.audioFileName) {
+          setAudioLabel(savedSession.audioFileName);
+        }
         setImportMessage(
           importedItems ? `Imported ${importedTimestamps.length} timestamps.` : null,
         );
+        if (savedSession && restoredTimestamps.length > 0) {
+          skipAutosaveMessageRef.current = true;
+          setAutosaveMessage(
+            `Restored ${restoredTimestamps.length} saved timestamps. Re-upload audio if needed.`,
+          );
+        } else {
+          setAutosaveMessage(null);
+        }
         setRangeMessage(`Loaded ${loadedAyahs.length} ayahs from ${formatRange(range)}.`);
       } catch {
         setRangeMessage("Could not load that Quran range. Check your connection and try again.");
@@ -292,6 +316,23 @@ export default function TimestampEditor({ initialSurahId }: TimestampEditorProps
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (ayahs.length === 0) {
+      return;
+    }
+
+    saveSession(loadedRange, timestamps, currentAyahKey, audioLabel);
+
+    if (skipAutosaveMessageRef.current) {
+      skipAutosaveMessageRef.current = false;
+      return;
+    }
+
+    if (timestamps.length > 0) {
+      setAutosaveMessage("Progress auto-saved.");
+    }
+  }, [audioLabel, ayahs.length, currentAyahKey, loadedRange, timestamps]);
 
   const advancePreviewIfNeeded = useCallback(
     (time: number) => {
@@ -503,6 +544,9 @@ export default function TimestampEditor({ initialSurahId }: TimestampEditorProps
       ),
     );
     setPreviewMessage(`Marked end for ayah ${currentTimestamp.surah}:${currentTimestamp.ayah}.`);
+    setAutosaveMessage(
+      `Ayah ${currentTimestamp.surah}:${currentTimestamp.ayah} completed and auto-saved.`,
+    );
   }, [ayahs, currentAyahKey, currentTime, timestamps]);
 
   const handleUndo = useCallback(() => {
@@ -556,14 +600,22 @@ export default function TimestampEditor({ initialSurahId }: TimestampEditorProps
         const payload = JSON.parse(await file.text()) as {
           range?: AyahRange;
           surah?: number;
+          file?: string;
           timestamps?: ImportTimestamp[];
+          ayahs?: ImportTimestamp[];
         };
 
+        const importedItems = payload.ayahs ?? payload.timestamps ?? [];
+
+        if (payload.file && payload.file !== "No audio loaded") {
+          setAudioLabel(payload.file);
+        }
+
         if (payload.range) {
-          await applyRange(payload.range, payload.timestamps ?? [], payload.surah);
-        } else {
+          await applyRange(payload.range, importedItems, payload.surah);
+        } else if (importedItems.length > 0) {
           const importedTimestamps = hydrateTimestamps(
-            payload.timestamps ?? [],
+            importedItems,
             ayahs,
             payload.surah ?? loadedRange.startSurah,
           );
@@ -571,7 +623,10 @@ export default function TimestampEditor({ initialSurahId }: TimestampEditorProps
           setTimestamps(importedTimestamps);
           setCurrentAyahKey(getNextPendingAyahKey(ayahs, importedTimestamps, ayahs[0]?.key ?? ""));
           setMarkHistory([]);
+          setAutosaveMessage(null);
           setImportMessage(`Imported ${importedTimestamps.length} timestamps.`);
+        } else {
+          setImportMessage("No ayah timestamps found in that JSON file.");
         }
       } catch {
         setImportMessage("Could not import that JSON file.");
@@ -745,6 +800,7 @@ export default function TimestampEditor({ initialSurahId }: TimestampEditorProps
             <div className="mt-3 flex flex-wrap items-center gap-3 text-sm text-slate-500">
               <span>Audio: {audioLabel}</span>
               {importMessage ? <span className="text-teal-700">{importMessage}</span> : null}
+              {autosaveMessage ? <span className="text-emerald-700">{autosaveMessage}</span> : null}
             </div>
           </div>
 
@@ -820,7 +876,9 @@ export default function TimestampEditor({ initialSurahId }: TimestampEditorProps
                 </button>
                 <button
                   type="button"
-                  onClick={() => downloadTimestampJson(loadedRange, exportableTimestamps)}
+                  onClick={() =>
+                    downloadTimestampJson(loadedRange, audioLabel, exportableTimestamps)
+                  }
                   className="rounded-2xl border border-slate-300 bg-white px-8 py-3 font-semibold text-slate-900 transition hover:bg-slate-50"
                 >
                   Export JSON

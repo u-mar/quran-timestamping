@@ -1,36 +1,60 @@
 import type { AyahRange, Timestamp } from "./surah-data";
 
 export type TimestampExport = {
-  range: AyahRange;
-  timestamps: {
+  file: string;
+  timeFormat: "seconds";
+  ayahs: {
     key: string;
-    surah: number;
-    ayah: number;
     start: number;
     end?: number;
   }[];
 };
 
-export function buildTimestampExport(range: AyahRange, timestamps: Timestamp[]): TimestampExport {
+function formatTimestampValue(value: number): number {
+  const rounded = Number(value.toFixed(2));
+  return rounded % 1 === 0 ? Math.round(rounded) : rounded;
+}
+
+export function buildTimestampExport(
+  audioFileName: string,
+  timestamps: Timestamp[],
+): TimestampExport {
   return {
-    range,
-    timestamps: timestamps
+    file: audioFileName,
+    timeFormat: "seconds",
+    ayahs: timestamps
       .filter((timestamp) => Number.isFinite(timestamp.start))
       .map((timestamp) => ({
         key: timestamp.key,
-        surah: timestamp.surah,
-        ayah: timestamp.ayah,
-        start: Number(timestamp.start.toFixed(2)),
+        start: formatTimestampValue(timestamp.start),
         ...(Number.isFinite(timestamp.end)
-          ? { end: Number(timestamp.end!.toFixed(2)) }
+          ? { end: formatTimestampValue(timestamp.end!) }
           : {}),
       }))
-      .sort((a, b) => (a.surah === b.surah ? a.ayah - b.ayah : a.surah - b.surah)),
+      .sort((left, right) => {
+        const [leftSurah, leftAyah] = left.key.split(":").map(Number);
+        const [rightSurah, rightAyah] = right.key.split(":").map(Number);
+
+        return leftSurah === rightSurah ? leftAyah - rightAyah : leftSurah - rightSurah;
+      }),
   };
 }
 
-export function downloadTimestampJson(range: AyahRange, timestamps: Timestamp[]) {
-  const payload = buildTimestampExport(range, timestamps);
+function buildExportFileName(range: AyahRange, audioFileName: string): string {
+  if (audioFileName && audioFileName !== "No audio loaded") {
+    const baseName = audioFileName.replace(/\.[^.]+$/, "");
+    return `${baseName}.json`;
+  }
+
+  return `surah-${range.startSurah}-${range.startAyah}-to-${range.endSurah}-${range.endAyah}.json`;
+}
+
+export function downloadTimestampJson(
+  range: AyahRange,
+  audioFileName: string,
+  timestamps: Timestamp[],
+) {
+  const payload = buildTimestampExport(audioFileName, timestamps);
   const blob = new Blob([JSON.stringify(payload, null, 2)], {
     type: "application/json",
   });
@@ -38,7 +62,7 @@ export function downloadTimestampJson(range: AyahRange, timestamps: Timestamp[])
   const anchor = document.createElement("a");
 
   anchor.href = url;
-  anchor.download = `surah-${range.startSurah}-${range.startAyah}-to-${range.endSurah}-${range.endAyah}-tafseer.json`;
+  anchor.download = buildExportFileName(range, audioFileName);
   anchor.click();
 
   URL.revokeObjectURL(url);
